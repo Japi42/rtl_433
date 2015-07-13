@@ -73,6 +73,7 @@ Running:
            [21] Calibeur RF-104 Sensor
            [22] X10 RF
            [23] DSC (Digital Security Controls)
+           [24] Acurite Temperature and Humidity Sensor (00592TXR)
 
 
 Examples:

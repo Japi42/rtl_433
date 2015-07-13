@@ -24,7 +24,8 @@
 		DECL(ambient_weather) \
 		DECL(calibeur_RF104) \
 		DECL(X10_RF) \
-		DECL(DSC)
+		DECL(DSC) \
+		DECL(acurite_th_592txr)
 
 
 #define BITBUF_COLS             34

@@ -1,5 +1,8 @@
 #include "rtl_433.h"
 
+// buffer to hold localized timestamp YYYY-MM-DD HH:MM:SS
+#define LOCAL_TIME_BUFLEN	32
+
 // ** Acurite 5n1 functions **
 
 const float acurite_winddirections[] =
@@ -174,6 +177,123 @@ static int acurite_th_callback(uint8_t bb[BITBUF_ROWS][BITBUF_COLS], int16_t bit
     return 0;
 }
 
+/*
+ * Acurite 00592TXR / 06002RM Temperature and Humidity Sensor
+ * FCC ID: RNERF100VTXR
+ * IC: 6608A-RF100VTXR
+ * 
+ * Documented temperature range of the device is -40C to 70C
+ * Humidity is 1% to 99% relative humidity
+ * The sensor ID is set by a switch in the battery compartment, it appears to changes the high 2 bits of byte 0.
+ * Updates every 16 to 18 seconds.
+ * Only tested with one device, values in bytes 0 through 2 might not be correct/consistent.  
+ *
+ * 7 byte message:
+ * [0]: Sensor ID, set by switch.  'ce' for 'A', '8e' for 'B', '0e' for 'C'
+ * [1]: 1c?
+ * [2]: 44?
+ * [3]: humidity, bit 7 is parity.
+ * [4]: temperature, high 4 bits, bit 7 is parity.
+ * [5]: temperature, low 7 bits, bit 7 is parity.
+ * [6]: checksum, bytes 0-5 summed.
+ *
+ * The temperature is (C+100)*10
+ * The humidity is a percentage, no conversion needed.
+ * 
+ */
+
+static int acurite_th592_parity_check(const uint8_t test_byte) {
+  int parity_bit = 0;
+
+  int bit;
+  for(bit=0;bit<7;++bit) {
+    if(test_byte & (1 << bit)) {
+      ++parity_bit;
+    }
+  }
+
+  parity_bit &= 0x01;
+
+  if(parity_bit == (test_byte >> 7)) return 1;
+  return 0;
+}
+
+static int acurite_th592_detect(const uint8_t *buf) {
+    int i;
+
+    // sanity check, make sure it's not an empty row, and that it doesn't include extra data.
+
+    if(buf[0] == 0x00 || buf[7] != 0x00) return 0;
+
+    // verify the checksum, it should be equal to the sum of the first six bytes.
+
+    uint8_t sum = 0;
+    for(i=0;i<6;++i) {
+        sum = (sum + buf[i]) & 0xff;
+    }
+
+    if(sum != buf[6]) {
+        return 0;
+    }
+
+    // verify the parity bits for the humidity and temperature bytes.
+
+    if(acurite_th592_parity_check(buf[3]) == 0 ||
+       acurite_th592_parity_check(buf[4]) == 0 ||
+       acurite_th592_parity_check(buf[5]) == 0) {
+        return 0;
+    }
+
+    // everything checks out OK
+
+    return 1;
+}
+
+static float acurite_th592_temperature(const uint8_t high_byte, const uint8_t low_byte){
+    int shifted = ((high_byte & 0x07f) << 7) | (low_byte & 0x07f);
+    shifted = shifted - 1000;
+    float temperature = shifted / 10.0;
+    return temperature;
+}
+
+static int acurite_th592_callback(uint8_t bb[BITBUF_ROWS][BITBUF_COLS], int16_t bits_per_row[BITBUF_ROWS]) {
+    uint8_t *buf = NULL;
+    uint8_t sensor_id;
+    int i;
+
+    for(i = 0; i < BITBUF_ROWS; i++){
+	if(bits_per_row[i] > 0 && acurite_th592_detect(bb[i])){
+            buf = bb[i];
+            break;
+        }
+    }
+
+    if(buf){
+	time_t time_now;
+	char time_str[LOCAL_TIME_BUFLEN];
+	struct tm *tm_info;
+
+	sensor_id = buf[0];
+
+	time(&time_now);
+	tm_info = localtime(&time_now);
+	strftime(time_str, LOCAL_TIME_BUFLEN, "%Y-%m-%d %H:%M:%S", tm_info);
+
+	float temp_c = acurite_th592_temperature(buf[4],buf[5]);
+	float temp_f = temp_c * 1.8 + 32;
+	float humidity = (buf[3] & 0x07f);
+
+	printf("%s Acurite 592TXR Sensor %02x: Temperature %3.1f C / %3.1f F\n",
+		time_str, sensor_id, temp_c, temp_f);
+	printf("%s Acurite 592TXR Sensor %02x: Humidity %3.1f%%\n",
+		time_str, sensor_id, humidity);
+
+        return 1;
+    }
+
+    return 0;
+}
+
 r_device acurite5n1 = {
     /* .name           = */ "Acurite 5n1 Weather Station",
     /* .modulation     = */ OOK_PWM_P,
@@ -181,6 +301,8 @@ r_device acurite5n1 = {
     /* .long_limit     = */ 240,
     /* .reset_limit    = */ 21000,
     /* .json_callback  = */ &acurite5n1_callback,
+    /* .disabled       = */ 0,
+    /* .demod_arg      = */ 0 
 };
 
 r_device acurite_rain_gauge = {
@@ -190,6 +312,8 @@ r_device acurite_rain_gauge = {
     /* .long_limit     = */ 3500/4,
     /* .reset_limit    = */ 5000/4,
     /* .json_callback  = */ &acurite_rain_gauge_callback,
+    /* .disabled       = */ 0,
+    /* .demod_arg      = */ 0 
 };
 
 r_device acurite_th = {
@@ -199,4 +323,18 @@ r_device acurite_th = {
     /* .long_limit     = */ 550,
     /* .reset_limit    = */ 2500,
     /* .json_callback  = */ &acurite_th_callback,
+    /* .disabled       = */ 0,
+    /* .demod_arg      = */ 0 
 };
+
+r_device acurite_th_592txr = {
+    /* .name           = */ "Acurite Temperature and Humidity Sensor (00592TXR)",
+    /* .modulation     = */ OOK_PULSE_PWM_TERNARY,
+    /* .short_limit    = */ 70,
+    /* .long_limit     = */ 120,
+    /* .reset_limit    = */ 800,
+    /* .json_callback  = */ &acurite_th592_callback,
+    /* .disabled       = */ 0,
+    /* .demod_arg      = */ 2 
+};
+
